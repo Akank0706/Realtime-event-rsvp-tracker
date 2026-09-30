@@ -1,0 +1,8 @@
+{
+  "name": "Real-Time Cloud-Based Event Planning & RSVP Tracker",
+  "description": "A real-time cloud-based event planning and RSVP management platform with live counter sync, capacity & waitlist management, and organizer analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,109 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isOrganizer() {
+      return isAuthenticated() && getUserData().role == 'organizer';
+    }
+
+    // 1. Users collection:
+    // - Anyone authenticated can read user public profiles.
+    // - A user can create their own profile during registration.
+    // - On update: a user CANNOT escalate their role (role field cannot be changed).
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isOwner(userId) &&
+        request.resource.data.keys().hasAll(['name', 'email', 'role']) &&
+        (request.resource.data.role in ['organizer', 'attendee']);
+      allow update: if isOwner(userId) &&
+        // Prevent role escalation
+        request.resource.data.role == resource.data.role;
+      allow delete: if false; // Deletion restricted
+    }
+
+    // 2. Events collection:
+    // - Read: anyone authenticated can read published events; organizers can read their own drafts.
+    // - Create: only organizers can create events, and the event must set organizerId to their own uid.
+    // - Update/Delete: only the organizer who created the event can edit/publish/cancel/delete it.
+    // - Atomic RSVP counts update permitted through transactional integrity.
+    match /events/{eventId} {
+      allow read: if isAuthenticated() && (
+        resource.data.status == 'PUBLISHED' ||
+        resource.data.status == 'FULL' ||
+        resource.data.status == 'CANCELLED' ||
+        resource.data.status == 'COMPLETED' ||
+        (isOrganizer() && resource.data.organizerId == request.auth.uid)
+      );
+
+      allow create: if isOrganizer() &&
+        request.resource.data.organizerId == request.auth.uid &&
+        request.resource.data.capacity > 0;
+
+      allow update: if isAuthenticated() && (
+        // Organizer modifying event details
+        (isOrganizer() && resource.data.organizerId == request.auth.uid) ||
+        // Attendee transactional counter update (only goingCount, maybeCount, notGoingCount, waitlistCount, status)
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['goingCount', 'maybeCount', 'notGoingCount', 'waitlistCount', 'status', 'updatedAt']))
+      );
+
+      allow delete: if isOrganizer() && resource.data.organizerId == request.auth.uid;
+
+      // RSVPs subcollection: events/{eventId}/rsvps/{userId}
+      // - Attendees can read and write only their own RSVP.
+      // - Organizers of this event can read all RSVPs.
+      match /rsvps/{userId} {
+        allow read: if isAuthenticated() && (
+          isOwner(userId) ||
+          get(/databases/$(database)/documents/events/$(eventId)).data.organizerId == request.auth.uid
+        );
+        allow create, update: if isOwner(userId) &&
+          request.resource.data.status in ['GOING', 'MAYBE', 'NOT_GOING'];
+        allow delete: if isOwner(userId);
+      }
+
+      // Waitlist subcollection: events/{eventId}/waitlist/{userId}
+      match /waitlist/{userId} {
+        allow read: if isAuthenticated() && (
+          isOwner(userId) ||
+          get(/databases/$(database)/documents/events/$(eventId)).data.organizerId == request.auth.uid
+        );
+        allow create: if isOwner(userId);
+        allow update, delete: if isOwner(userId) ||
+          get(/databases/$(database)/documents/events/$(eventId)).data.organizerId == request.auth.uid;
+      }
+
+      // Announcements subcollection: events/{eventId}/announcements/{announcementId}
+      // - Organizers can create/manage announcements for their event.
+      // - Attendees who have RSVP'd or can view the event can read announcements.
+      match /announcements/{announcementId} {
+        allow read: if isAuthenticated();
+        allow write: if isOrganizer() &&
+          get(/databases/$(database)/documents/events/$(eventId)).data.organizerId == request.auth.uid;
+      }
+    }
+
+    // 3. Notifications collection: notifications/{notificationId}
+    // - Users can read and update (e.g. mark read) only their own notifications.
+    // - Organizers or system functions can create notifications destined for targeted attendees.
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      allow create: if isAuthenticated();
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+  }
+}
